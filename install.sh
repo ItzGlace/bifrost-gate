@@ -122,21 +122,56 @@ download_binary() {
     return
   fi
 
+  if [[ -f "$SCRIPT_DIR/${asset_name}.zip" ]]; then
+    log "using local asset archive: $SCRIPT_DIR/${asset_name}.zip"
+    extract_binary_from_zip "$SCRIPT_DIR/${asset_name}.zip" "$asset_name" "$output_path"
+    return
+  fi
+
   local url="${BIFROST_DOWNLOAD_URL:-}"
 
   if [[ -z "$url" ]]; then
     local raw_base="${BIFROST_RAW_BASE_URL:-https://raw.githubusercontent.com/ItzGlace/bifrost-gate/main}"
-    url="${raw_base%/}/${asset_name}"
+    url="${raw_base%/}/${asset_name}.zip"
+  fi
+
+  local downloaded="$TMP_DIR/${asset_name}.download"
+  if [[ "$url" == *.zip ]]; then
+    downloaded="$TMP_DIR/${asset_name}.zip"
   fi
 
   log "downloading binary: $url"
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$url" -o "$output_path" || fail "download failed from $url"
+    curl -fsSL "$url" -o "$downloaded" || fail "download failed from $url"
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$output_path" "$url" || fail "download failed from $url"
+    wget -qO "$downloaded" "$url" || fail "download failed from $url"
   else
     fail "curl or wget is required"
   fi
+
+  if [[ "$url" == *.zip ]]; then
+    extract_binary_from_zip "$downloaded" "$asset_name" "$output_path"
+  else
+    cp "$downloaded" "$output_path"
+  fi
+}
+
+extract_binary_from_zip() {
+  local zip_path="$1"
+  local asset_name="$2"
+  local output_path="$3"
+
+  ensure_cmd unzip unzip
+
+  if unzip -p "$zip_path" "$asset_name" >"$output_path" 2>/dev/null; then
+    return
+  fi
+
+  local zip_entry
+  zip_entry="$(unzip -Z1 "$zip_path" | awk 'NF {print; exit}')"
+  [[ -n "$zip_entry" ]] || fail "zip archive is empty: $zip_path"
+
+  unzip -p "$zip_path" "$zip_entry" >"$output_path" || fail "failed to extract binary from $zip_path"
 }
 
 download_manager_script() {
