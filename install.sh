@@ -8,7 +8,8 @@ BINARY_PATH="$INSTALL_DIR/bifrost-gate"
 CONFIG_DIR="/etc/bifrost"
 CONFIG_PATH="$CONFIG_DIR/config.json"
 MANAGER_PATH="/usr/local/bin/bifrost"
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+SCRIPT_SOURCE="${BASH_SOURCE[0]-$0}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_SOURCE")" >/dev/null 2>&1 && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
