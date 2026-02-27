@@ -11,7 +11,7 @@
 ### نصب سریع
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ItzGlace/bifrost-gate/refs/heads/main/install.sh | sudo bash
+bash <(curl -Ls https://raw.githubusercontent.com/ItzGlace/bifrost-gate/refs/heads/main/install.sh)
 ```
 
 در حین نصب از شما این موارد پرسیده می‌شود:
