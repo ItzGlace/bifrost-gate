@@ -18,7 +18,6 @@ curl -fsSL https://raw.githubusercontent.com/ItzGlace/bifrost-gate/refs/heads/ma
 - نام کاربری پنل
 - رمز پنل
 - پورت پنل/API (پیش‌فرض: `11001`)
-- License timeout
 
 ---
 
@@ -116,7 +115,6 @@ You will be prompted for:
 - Panel username
 - Panel password
 - Panel/API port (default: `11001`)
-- License timeout
 
 ---
 
