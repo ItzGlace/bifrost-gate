@@ -2,7 +2,7 @@
   <img src="https://raw.githubusercontent.com/ItzGlace/bifrost-gate/refs/heads/main/logo.png" alt="Bifrost Gate Logo" width="180" />
 </p>
 
-# Bifrost Gate v1.0-released
+# Bifrost Gate
 
 ---
 
