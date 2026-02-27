@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./logo.png" alt="Bifrost Gate Logo" width="180" />
+  <img src="https://raw.githubusercontent.com/ItzGlace/bifrost-gate/refs/heads/main/logo.png" alt="Bifrost Gate Logo" width="180" />
 </p>
 
 # Bifrost Gate v1.0-released
@@ -10,22 +10,8 @@
 
 ### نصب سریع
 
-1. وارد پوشه ریلیز شوید:
-
 ```bash
-cd /path/to/v1.0-released
-```
-
-2. (اختیاری ولی توصیه‌شده) صحت فایل‌ها را بررسی کنید:
-
-```bash
-sha256sum -c SHA256SUMS
-```
-
-3. نصب آنلاین با `install.sh`:
-
-```bash
-sudo bash install.sh
+curl -fsSL https://raw.githubusercontent.com/ItzGlace/bifrost-gate/refs/heads/main/install.sh | sudo bash
 ```
 
 در حین نصب از شما این موارد پرسیده می‌شود:
@@ -138,6 +124,12 @@ sha256sum -c SHA256SUMS
 sudo bash install.sh
 ```
 
+Or direct one-line install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ItzGlace/bifrost-gate/refs/heads/main/install.sh | sudo bash
+```
+
 You will be prompted for:
 - Panel username
 - Panel password
@@ -223,4 +215,3 @@ Field mapping:
 Clients must connect to the Bifrost listener:
 - `SERVER_IP:listen_port`
 - using the same `Host` and `Path`
-
