@@ -106,25 +106,7 @@ http://SERVER_IP:11001/login
 
 ### Quick Setup
 
-1. Enter the release directory:
-
-```bash
-cd /path/to/v1.0-released
-```
-
-2. (Optional but recommended) verify checksums:
-
-```bash
-sha256sum -c SHA256SUMS
-```
-
-3. Online installation with `install.sh`:
-
-```bash
-sudo bash install.sh
-```
-
-Or direct one-line install:
+direct one-line install:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ItzGlace/bifrost-gate/refs/heads/main/install.sh | sudo bash
