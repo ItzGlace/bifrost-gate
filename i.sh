@@ -2,9 +2,13 @@
 set -euo pipefail
 
 # ─── Multi-instance Slipstream server setup ───
-# Creates 21 services from a base domain label:
-#   n00.e4h.ir -> n00..n20.e4h.ir
-#   a.r4h.ir   -> a00..a20.r4h.ir
+# Modes:
+# 1) Legacy range mode:
+#      --domain n00.example.com --instance-count 21
+#      -> n00..n20.example.com
+# 2) Multi-root-domain mode (same approach as slipstream-mux):
+#      --root-domains d1.com,d2.com --subdomain-labels n01,n02,n03,n04
+#      -> n01.d1.com,n01.d2.com,n02.d1.com,...
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -20,12 +24,15 @@ PINNED_COMMIT="bc772dd07d9a136dbd7553b0da575526de207847"
 
 # ─── Defaults ───
 DOMAIN=""
+ROOT_DOMAINS=""
+SUBDOMAIN_LABELS=""
 DNS_PORT=53
 SOCKS_PORT=1080
 INSTALL_DIR="/opt/slipstream-rust"
 CERT_DIR="/opt/slipstream-rust"
 SERVICE_PREFIX="slipstream"
 INSTANCE_COUNT=21
+SUBDOMAINS_PER_DOMAIN=0
 INTERNAL_DNS_PORT_BASE=10000
 DNSDIST_CONF="/etc/dnsdist/dnsdist.conf"
 
@@ -36,21 +43,44 @@ port_in_use() {
     return 1
 }
 
+trim() {
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
+split_csv() {
+    local input="$1"
+    local -n out_ref="$2"
+    out_ref=()
+    IFS=',' read -r -a _tmp <<< "$input"
+    for item in "${_tmp[@]}"; do
+        item="$(trim "$item")"
+        [[ -z "$item" ]] && continue
+        out_ref+=("$item")
+    done
+}
+
 usage() {
     cat <<EOF
-Usage: $0 --domain <tunnel-domain> [OPTIONS]
+Usage: $0 [--domain <tunnel-domain> | --root-domains <csv>] [OPTIONS]
 
-Required:
-  --domain DOMAIN       Base tunnel domain (e.g. n00.e4h.ir or a.r4h.ir)
+Required (choose one mode):
+  --domain DOMAIN             Legacy base tunnel domain (e.g. n00.e4h.ir)
+  --root-domains CSV          Multi-domain roots (e.g. d1.ir,d2.ir,d3.ir)
 
 Options:
-  --dns-port PORT       Public DNS listen port for dnsdist (default: 53)
-                        Slipstream instances always use internal ports from 10000
-  --socks-port PORT     Upstream SOCKS target port (default: 1080)
-  --install-dir DIR     Install directory (default: /opt/slipstream-rust)
-  --service-prefix PFX  Systemd service prefix (default: slipstream)
-  --uninstall           Remove everything
-  -h, --help            Show this help
+  --subdomain-labels CSV      Labels for multi-domain mode (e.g. n01,n02,n03,n04)
+  --subdomains-per-domain N   Use only first N labels from --subdomain-labels (default: 0 = all)
+  --instance-count N          Legacy mode instance count (default: 21)
+  --dns-port PORT             Public DNS listen port for dnsdist (default: 53)
+                              Slipstream instances always use internal ports from 10000
+  --socks-port PORT           Upstream SOCKS target port (default: 1080)
+  --install-dir DIR           Install directory (default: /opt/slipstream-rust)
+  --service-prefix PFX        Systemd service prefix (default: slipstream)
+  --uninstall                 Remove everything
+  -h, --help                  Show this help
 EOF
     exit 0
 }
@@ -100,6 +130,10 @@ uninstall() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --domain)      DOMAIN="$2"; shift 2 ;;
+        --root-domains) ROOT_DOMAINS="$2"; shift 2 ;;
+        --subdomain-labels) SUBDOMAIN_LABELS="$2"; shift 2 ;;
+        --subdomains-per-domain) SUBDOMAINS_PER_DOMAIN="$2"; shift 2 ;;
+        --instance-count) INSTANCE_COUNT="$2"; shift 2 ;;
         --dns-port)    DNS_PORT="$2"; shift 2 ;;
         --socks-port)  SOCKS_PORT="$2"; shift 2 ;;
         --install-dir) INSTALL_DIR="$2"; CERT_DIR="$2"; shift 2 ;;
@@ -110,7 +144,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -z "$DOMAIN" ]] && err "Missing required --domain. Run with --help for usage."
+if [[ -n "$DOMAIN" && -n "$ROOT_DOMAINS" ]]; then
+    err "Use either --domain (legacy mode) or --root-domains (multi-domain mode), not both."
+fi
+if [[ -z "$DOMAIN" && -z "$ROOT_DOMAINS" ]]; then
+    err "Missing required mode. Use --domain or --root-domains."
+fi
+if [[ -n "$ROOT_DOMAINS" && -z "$SUBDOMAIN_LABELS" ]]; then
+    err "--subdomain-labels is required when using --root-domains."
+fi
+[[ "$INSTANCE_COUNT" =~ ^[0-9]+$ ]] || err "--instance-count must be a non-negative integer."
+[[ "$SUBDOMAINS_PER_DOMAIN" =~ ^[0-9]+$ ]] || err "--subdomains-per-domain must be a non-negative integer."
 [[ $(id -u) -ne 0 ]] && err "Must run as root."
 
 cleanup_existing_install
@@ -175,51 +219,90 @@ log "Building slipstream-server (this may take a few minutes)..."
 cargo build --release -p slipstream-server --quiet 2>&1
 log "Build complete."
 
-if [[ ! -f "${CERT_DIR}/cert.pem" || ! -f "${CERT_DIR}/key.pem" ]]; then
-    log "Generating self-signed TLS cert/key in ${CERT_DIR}..."
-    openssl req -x509 -newkey rsa:2048 -nodes \
-      -keyout "${CERT_DIR}/key.pem" \
-      -out "${CERT_DIR}/cert.pem" \
-      -days 3650 \
-      -subj "/CN=${DOMAIN}" >/dev/null 2>&1
-fi
-
 if [[ ! -f "${CERT_DIR}/reset-seed" ]]; then
     log "Generating reset-seed in ${CERT_DIR}/reset-seed..."
     openssl rand -hex 16 > "${CERT_DIR}/reset-seed"
     chmod 600 "${CERT_DIR}/reset-seed"
 fi
 
-FIRST_LABEL="${DOMAIN%%.*}"
-PARENT="${DOMAIN#*.}"
-[[ "$PARENT" != "$DOMAIN" ]] || err "--domain must contain at least one dot."
+declare -a TARGET_DOMAINS=()
+declare -a ROOT_DOMAIN_LIST=()
+declare -a SUBDOMAIN_LABEL_LIST=()
+PARENT="(multiple)"
 
-LABEL_PREFIX=""
-START_NUM=0
-WIDTH=2
-if [[ "$FIRST_LABEL" =~ ^([[:alpha:]_-]*)([0-9]+)$ ]]; then
-    LABEL_PREFIX="${BASH_REMATCH[1]}"
-    START_NUM=$((10#${BASH_REMATCH[2]}))
-    WIDTH=${#BASH_REMATCH[2]}
+if [[ -n "$ROOT_DOMAINS" ]]; then
+    split_csv "$ROOT_DOMAINS" ROOT_DOMAIN_LIST
+    split_csv "$SUBDOMAIN_LABELS" SUBDOMAIN_LABEL_LIST
+    [[ ${#ROOT_DOMAIN_LIST[@]} -gt 0 ]] || err "--root-domains is empty after parsing."
+    [[ ${#SUBDOMAIN_LABEL_LIST[@]} -gt 0 ]] || err "--subdomain-labels is empty after parsing."
+
+    if [[ "$SUBDOMAINS_PER_DOMAIN" =~ ^[0-9]+$ ]] && (( SUBDOMAINS_PER_DOMAIN > 0 )); then
+        if (( SUBDOMAINS_PER_DOMAIN < ${#SUBDOMAIN_LABEL_LIST[@]} )); then
+            SUBDOMAIN_LABEL_LIST=("${SUBDOMAIN_LABEL_LIST[@]:0:SUBDOMAINS_PER_DOMAIN}")
+        fi
+    fi
+
+    for root in "${ROOT_DOMAIN_LIST[@]}"; do
+        [[ "$root" == *.* ]] || err "Invalid root domain: ${root}"
+    done
+    for label in "${SUBDOMAIN_LABEL_LIST[@]}"; do
+        [[ "$label" == *.* ]] && err "Invalid subdomain label '${label}' (must not contain dots)"
+    done
+
+    # Interleaved order (label-major) to match slipstream-mux approach.
+    for label in "${SUBDOMAIN_LABEL_LIST[@]}"; do
+        for root in "${ROOT_DOMAIN_LIST[@]}"; do
+            TARGET_DOMAINS+=("${label}.${root}")
+        done
+    done
 else
-    LABEL_PREFIX="$FIRST_LABEL"
+    FIRST_LABEL="${DOMAIN%%.*}"
+    PARENT="${DOMAIN#*.}"
+    [[ "$PARENT" != "$DOMAIN" ]] || err "--domain must contain at least one dot."
+
+    LABEL_PREFIX=""
+    START_NUM=0
+    WIDTH=2
+    if [[ "$FIRST_LABEL" =~ ^([[:alpha:]_-]*)([0-9]+)$ ]]; then
+        LABEL_PREFIX="${BASH_REMATCH[1]}"
+        START_NUM=$((10#${BASH_REMATCH[2]}))
+        WIDTH=${#BASH_REMATCH[2]}
+    else
+        LABEL_PREFIX="$FIRST_LABEL"
+    fi
+
+    for ((i=0; i<INSTANCE_COUNT; i++)); do
+        index=$((START_NUM + i))
+        numbered_label="$(printf "%s%0*d" "$LABEL_PREFIX" "$WIDTH" "$index")"
+        TARGET_DOMAINS+=("${numbered_label}.${PARENT}")
+    done
+fi
+
+[[ ${#TARGET_DOMAINS[@]} -gt 0 ]] || err "No domains generated."
+
+CERT_CN="${TARGET_DOMAINS[0]}"
+if [[ ! -f "${CERT_DIR}/cert.pem" || ! -f "${CERT_DIR}/key.pem" ]]; then
+    log "Generating self-signed TLS cert/key in ${CERT_DIR} (CN=${CERT_CN})..."
+    openssl req -x509 -newkey rsa:2048 -nodes \
+      -keyout "${CERT_DIR}/key.pem" \
+      -out "${CERT_DIR}/cert.pem" \
+      -days 3650 \
+      -subj "/CN=${CERT_CN}" >/dev/null 2>&1
 fi
 
 declare -a CREATED_UNITS=()
 declare -a CREATED_DOMAINS=()
 declare -a CREATED_PORTS=()
 next_dns_port="$INTERNAL_DNS_PORT_BASE"
-for ((i=0; i<INSTANCE_COUNT; i++)); do
-    index=$((START_NUM + i))
-    numbered_label="$(printf "%s%0*d" "$LABEL_PREFIX" "$WIDTH" "$index")"
-    domain_i="${numbered_label}.${PARENT}"
+for ((i=0; i<${#TARGET_DOMAINS[@]}; i++)); do
+    domain_i="${TARGET_DOMAINS[$i]}"
     while port_in_use "$next_dns_port"; do
         warn "DNS port ${next_dns_port} is already in use. Skipping."
         next_dns_port=$((next_dns_port + 1))
     done
     dns_port_i="$next_dns_port"
     next_dns_port=$((next_dns_port + 1))
-    unit="${SERVICE_PREFIX}-${numbered_label}.service"
+    unit="$(printf "%s-%03d.service" "$SERVICE_PREFIX" "$i")"
     unit_path="/etc/systemd/system/${unit}"
 
     cat > "$unit_path" <<EOF
@@ -300,14 +383,20 @@ echo -e "${GREEN}═════════════════════
 echo ""
 echo -e "  Server IP:     ${YELLOW}${SERVER_IP}${NC}"
 echo -e "  Domain range:  ${YELLOW}${CREATED_DOMAINS[0]}${NC} .. ${YELLOW}${CREATED_DOMAINS[-1]}${NC}"
-echo -e "  Parent zone:   ${YELLOW}${PARENT}${NC}"
+if [[ -n "$ROOT_DOMAINS" ]]; then
+    ROOTS_PRINT=$(IFS=,; echo "${ROOT_DOMAIN_LIST[*]}")
+    echo -e "  Root domains:  ${YELLOW}${ROOTS_PRINT}${NC}"
+    echo -e "  Labels used:   ${YELLOW}$(IFS=,; echo "${SUBDOMAIN_LABEL_LIST[*]}")${NC}"
+else
+    echo -e "  Parent zone:   ${YELLOW}${PARENT}${NC}"
+fi
 echo -e "  Public DNS:    0.0.0.0:${DNS_PORT} (dnsdist)"
 echo -e "  Internal DNS:  ${CREATED_PORTS[0]}..${CREATED_PORTS[-1]} (used: ${#CREATED_PORTS[@]})"
 echo -e "  SOCKS target:  127.0.0.1:${SOCKS_PORT}"
 echo -e "  Slipstream:    ${YELLOW}${COMMIT_HASH}${NC} - ${COMMIT_MSG} (${COMMIT_DATE})"
 echo ""
 echo -e "${YELLOW}  Client usage:${NC}"
-echo -e "  slipstream-client --tcp-listen-port 7000 --domain ${FIRST_LABEL}.${PARENT}"
+echo -e "  slipstream-client --tcp-listen-port 7000 --domain ${CREATED_DOMAINS[0]}"
 echo -e "  Then: curl -x socks5h://127.0.0.1:7000 http://ifconfig.me"
 echo ""
 echo -e "${YELLOW}  Management:${NC}"
@@ -315,5 +404,5 @@ echo -e "  systemctl status ${SERVICE_PREFIX}-*"
 echo -e "  systemctl status dnsdist"
 echo -e "  journalctl -fu ${CREATED_UNITS[0]}  # example"
 echo -e "  journalctl -fu dnsdist"
-echo -e "  bash install.sh --uninstall    # remove everything"
+echo -e "  bash /var/www/slip-server.sh --uninstall    # remove everything"
 echo ""
