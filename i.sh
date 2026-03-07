@@ -100,7 +100,7 @@ fi
 log "Installing system packages..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq build-essential cmake pkg-config libssl-dev git python3 curl >/dev/null 2>&1
+apt-get install -y -qq build-essential cmake pkg-config libssl-dev git python3 curl openssl >/dev/null 2>&1
 log "System packages installed."
 
 # ─── Install Rust ───
@@ -139,9 +139,20 @@ log "Building slipstream-server (this may take a few minutes)..."
 cargo build --release -p slipstream-server --quiet 2>&1
 log "Build complete."
 
-[[ -f "${CERT_DIR}/cert.pem" ]] || err "Missing cert: ${CERT_DIR}/cert.pem"
-[[ -f "${CERT_DIR}/key.pem" ]] || err "Missing key: ${CERT_DIR}/key.pem"
-[[ -f "${CERT_DIR}/reset-seed" ]] || err "Missing reset-seed: ${CERT_DIR}/reset-seed"
+if [[ ! -f "${CERT_DIR}/cert.pem" || ! -f "${CERT_DIR}/key.pem" ]]; then
+    log "Generating self-signed TLS cert/key in ${CERT_DIR}..."
+    openssl req -x509 -newkey rsa:2048 -nodes \
+      -keyout "${CERT_DIR}/key.pem" \
+      -out "${CERT_DIR}/cert.pem" \
+      -days 3650 \
+      -subj "/CN=${DOMAIN}" >/dev/null 2>&1
+fi
+
+if [[ ! -f "${CERT_DIR}/reset-seed" ]]; then
+    log "Generating reset-seed in ${CERT_DIR}/reset-seed..."
+    openssl rand -hex 16 > "${CERT_DIR}/reset-seed"
+    chmod 600 "${CERT_DIR}/reset-seed"
+fi
 
 FIRST_LABEL="${DOMAIN%%.*}"
 PARENT="${DOMAIN#*.}"
