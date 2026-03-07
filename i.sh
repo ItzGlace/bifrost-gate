@@ -26,6 +26,15 @@ INSTALL_DIR="/opt/slipstream-rust"
 CERT_DIR="/opt/slipstream-rust"
 SERVICE_PREFIX="slipstream"
 INSTANCE_COUNT=21
+INTERNAL_DNS_PORT_BASE=10000
+DNSDIST_CONF="/etc/dnsdist/dnsdist.conf"
+
+port_in_use() {
+    local p="$1"
+    ss -H -lupn 2>/dev/null | awk '{print $5}' | grep -qE "[:.]${p}$" && return 0
+    ss -H -ltpn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}$" && return 0
+    return 1
+}
 
 usage() {
     cat <<EOF
@@ -35,8 +44,8 @@ Required:
   --domain DOMAIN       Base tunnel domain (e.g. n00.e4h.ir or a.r4h.ir)
 
 Options:
-  --dns-port PORT       Starting DNS listen port (default: 53)
-                        Services use PORT..PORT+20
+  --dns-port PORT       Public DNS listen port for dnsdist (default: 53)
+                        Slipstream instances always use internal ports from 10000
   --socks-port PORT     Upstream SOCKS target port (default: 1080)
   --install-dir DIR     Install directory (default: /opt/slipstream-rust)
   --service-prefix PFX  Systemd service prefix (default: slipstream)
@@ -44,6 +53,28 @@ Options:
   -h, --help            Show this help
 EOF
     exit 0
+}
+
+cleanup_existing_install() {
+    log "Cleaning up previous/partial ${SERVICE_PREFIX} installation..."
+
+    mapfile -t units < <(find /etc/systemd/system -maxdepth 1 -type f -name "${SERVICE_PREFIX}-*.service" -printf '%f\n' 2>/dev/null || true)
+    units+=("${SERVICE_PREFIX}.service")
+
+    for unit in "${units[@]}"; do
+        [[ -z "$unit" ]] && continue
+        systemctl stop "$unit" 2>/dev/null || true
+        systemctl disable "$unit" 2>/dev/null || true
+        rm -f "/etc/systemd/system/$unit"
+    done
+
+    systemctl reset-failed "${SERVICE_PREFIX}"*.service 2>/dev/null || true
+
+    # Stop and clear front DNS router config so this run can recreate it cleanly.
+    systemctl stop dnsdist 2>/dev/null || true
+    rm -f "$DNSDIST_CONF"
+
+    systemctl daemon-reload
 }
 
 uninstall() {
@@ -56,6 +87,9 @@ uninstall() {
         systemctl disable "$unit" 2>/dev/null || true
         rm -f "/etc/systemd/system/$unit"
     done
+    systemctl stop dnsdist 2>/dev/null || true
+    systemctl disable dnsdist 2>/dev/null || true
+    rm -f "$DNSDIST_CONF"
     rm -rf "$INSTALL_DIR"
     systemctl daemon-reload
     log "Uninstalled."
@@ -79,6 +113,8 @@ done
 [[ -z "$DOMAIN" ]] && err "Missing required --domain. Run with --help for usage."
 [[ $(id -u) -ne 0 ]] && err "Must run as root."
 
+cleanup_existing_install
+
 # ─── Check OS ───
 if ! grep -qi ubuntu /etc/os-release 2>/dev/null; then
     warn "This script is designed for Ubuntu. Proceed at your own risk."
@@ -100,7 +136,7 @@ fi
 log "Installing system packages..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq build-essential cmake pkg-config libssl-dev git python3 curl openssl >/dev/null 2>&1
+apt-get install -y -qq build-essential cmake pkg-config libssl-dev git python3 curl openssl dnsdist >/dev/null 2>&1
 log "System packages installed."
 
 # ─── Install Rust ───
@@ -171,11 +207,18 @@ fi
 
 declare -a CREATED_UNITS=()
 declare -a CREATED_DOMAINS=()
+declare -a CREATED_PORTS=()
+next_dns_port="$INTERNAL_DNS_PORT_BASE"
 for ((i=0; i<INSTANCE_COUNT; i++)); do
     index=$((START_NUM + i))
     numbered_label="$(printf "%s%0*d" "$LABEL_PREFIX" "$WIDTH" "$index")"
     domain_i="${numbered_label}.${PARENT}"
-    dns_port_i=$((DNS_PORT + i))
+    while port_in_use "$next_dns_port"; do
+        warn "DNS port ${next_dns_port} is already in use. Skipping."
+        next_dns_port=$((next_dns_port + 1))
+    done
+    dns_port_i="$next_dns_port"
+    next_dns_port=$((next_dns_port + 1))
     unit="${SERVICE_PREFIX}-${numbered_label}.service"
     unit_path="/etc/systemd/system/${unit}"
 
@@ -203,13 +246,39 @@ WantedBy=multi-user.target
 EOF
     CREATED_UNITS+=("$unit")
     CREATED_DOMAINS+=("$domain_i")
+    CREATED_PORTS+=("$dns_port_i")
 done
+
+log "Writing dnsdist routing config on port ${DNS_PORT}..."
+cat > "$DNSDIST_CONF" <<EOF
+setLocal("0.0.0.0:${DNS_PORT}")
+setACL({"0.0.0.0/0", "::/0"})
+setConsoleACL({"127.0.0.1/8", "::1/128"})
+EOF
+
+for ((i=0; i<${#CREATED_DOMAINS[@]}; i++)); do
+    domain_i="${CREATED_DOMAINS[$i]}"
+    port_i="${CREATED_PORTS[$i]}"
+    pool_i="${SERVICE_PREFIX}${i}"
+    cat >> "$DNSDIST_CONF" <<EOF
+newServer({address="127.0.0.1:${port_i}", pool="${pool_i}"})
+smn${i}=newSuffixMatchNode()
+smn${i}:add(newDNSName("${domain_i}."))
+addAction(SuffixMatchNodeRule(smn${i}), PoolAction("${pool_i}"))
+EOF
+done
+
+cat >> "$DNSDIST_CONF" <<'EOF'
+addAction(AllRule(), RCodeAction(DNSRCode.REFUSED))
+EOF
 
 systemctl daemon-reload
 for unit in "${CREATED_UNITS[@]}"; do
     systemctl enable "$unit" >/dev/null 2>&1
     systemctl restart "$unit"
 done
+systemctl enable dnsdist >/dev/null 2>&1
+systemctl restart dnsdist
 sleep 2
 
 for unit in "${CREATED_UNITS[@]}"; do
@@ -217,6 +286,9 @@ for unit in "${CREATED_UNITS[@]}"; do
         err "$unit failed to start. Check: journalctl -u $unit --no-pager -n 40"
     fi
 done
+if ! systemctl is-active --quiet dnsdist; then
+    err "dnsdist failed to start. Check: journalctl -u dnsdist --no-pager -n 80"
+fi
 
 # ─── Print summary ───
 SERVER_IP=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || ip -4 addr show scope global | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
@@ -229,7 +301,8 @@ echo ""
 echo -e "  Server IP:     ${YELLOW}${SERVER_IP}${NC}"
 echo -e "  Domain range:  ${YELLOW}${CREATED_DOMAINS[0]}${NC} .. ${YELLOW}${CREATED_DOMAINS[-1]}${NC}"
 echo -e "  Parent zone:   ${YELLOW}${PARENT}${NC}"
-echo -e "  DNS ports:     ${DNS_PORT}..$((DNS_PORT + INSTANCE_COUNT - 1))"
+echo -e "  Public DNS:    0.0.0.0:${DNS_PORT} (dnsdist)"
+echo -e "  Internal DNS:  ${CREATED_PORTS[0]}..${CREATED_PORTS[-1]} (used: ${#CREATED_PORTS[@]})"
 echo -e "  SOCKS target:  127.0.0.1:${SOCKS_PORT}"
 echo -e "  Slipstream:    ${YELLOW}${COMMIT_HASH}${NC} - ${COMMIT_MSG} (${COMMIT_DATE})"
 echo ""
@@ -239,6 +312,8 @@ echo -e "  Then: curl -x socks5h://127.0.0.1:7000 http://ifconfig.me"
 echo ""
 echo -e "${YELLOW}  Management:${NC}"
 echo -e "  systemctl status ${SERVICE_PREFIX}-*"
+echo -e "  systemctl status dnsdist"
 echo -e "  journalctl -fu ${CREATED_UNITS[0]}  # example"
+echo -e "  journalctl -fu dnsdist"
 echo -e "  bash install.sh --uninstall    # remove everything"
 echo ""
