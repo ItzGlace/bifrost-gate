@@ -352,7 +352,10 @@ EOF
 done
 
 cat >> "$DNSDIST_CONF" <<'EOF'
-addAction(AllRule(), RCodeAction(DNSRCode.REFUSED))
+# Return NXDOMAIN for anything not mapped to a Slipstream suffix.
+# REFUSED here causes recursive resolvers to surface SERVFAIL/EDE
+# ("No Reachable Authority") for delegated labels.
+addAction(AllRule(), RCodeAction(DNSRCode.NXDOMAIN))
 EOF
 
 systemctl daemon-reload
